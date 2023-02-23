@@ -1,0 +1,197 @@
+program bmp4cjs;
+
+{$APPTYPE CONSOLE}
+
+{
+------------------------------------------------------------------------------
+
+                               BMP4CJS v1.0.4
+                               ==============
+
+                      Written by Brendan Silva - 2023
+
+                      https://github.com/BrendanSilva
+                  https://archive.org/details/@brendansilva
+            https://youtube.com/channel/UCYi8iNEIRKAh76Gjb62nDDA
+
+This  program is free software: you can redistribute it and/or modify it under
+the  terms of the GNU General Public License as published by the Free Software
+Foundation,  either  version  3 of the License. This program is distributed in
+the  hope  that  it will be useful, but without any warranty; without even the
+implied  warranty  of merchantability or fitness for a particular purpose. See
+the GNU General Public License for more details.
+
+------------------------------------------------------------------------------
+}
+
+uses
+  Classes, Controls, ExtCtrls, Forms, Graphics, Math, ShellApi, SysUtils;
+
+const
+  PgVersion : ShortString = '1.0.4';
+  HexString : ShortString = '0123456789ABCDEF';
+  SubPixel4 : Array [0..6] of Byte = (0, 1, 5, 6, 10, 11, 15);
+
+var
+  BmpInput    : Graphics.TBitmap;
+  BmpPixels   : PByteArray;
+  BmpPreview  : Boolean;
+  BmpSeek     : Word;
+  EqGrayRange : Array of Byte;
+  PrintStdOut : String;
+  Pix, EqM, EqA, A, B, X : Byte;
+  EqQ : Real;
+
+{------------------------------------------------------------------------------}
+
+function  SetStretchBltMode(DC: LongWord; StretchMode: Integer): Integer; stdcall; external 'gdi32.dll';
+procedure PreviewDismiss(Self: TObject; Sender: TObject; var Key: Word; Shift: TShiftState); begin if Key = 27 then Application.Terminate; end;
+
+{------------------------------------------------------------------------------}
+
+procedure PreviewShow(BmpOutput : TBitmap);
+var
+  PreviewForm : TForm;
+  PreviewDraw : TImage;
+  PreviewKill : TMethod;
+begin
+  Application.CreateForm(TForm, PreviewForm);
+  PreviewKill.Code := @PreviewDismiss;
+  PreviewKill.Data := PreviewForm;
+
+  with PreviewForm do
+  begin
+    OnKeyDown := TKeyEvent(PreviewKill);
+    BoundsRect := Rect(0, 0, 280, 280);
+    Position := poDesktopCenter;
+    BorderStyle := bsSingle;
+    BorderIcons := [biSystemMenu, biMinimize];
+    Caption := ExtractFileName(ParamStr(1));
+  end;
+
+  PreviewDraw := TImage.Create(PreviewForm);
+  with PreviewDraw do
+  begin
+    Parent := PreviewForm;
+    BoundsRect := Rect(0, 0, 224, 224);
+    Canvas.CopyRect(ClientRect, BmpOutput.Canvas, Rect(0, 0, 56, 56));
+    PreviewDraw.Show;
+  end;
+
+  PreviewForm.ShowModal;
+  PreviewForm.Free;
+end;
+
+{------------------------------------------------------------------------------}
+
+begin
+  if not FileExists(ParamStr(1)) then
+  begin
+    WriteLn(
+        #10 + 'BMP4CJS v' + PgVersion
+      + #10 + '=========' + StringOfChar('=',Length(PgVersion))
+      + #10
+      + #10 + '  Hex-encoded 56x56px 4-color image. - https://github.com/BrendanSilva'
+      + #10
+      + #10 + '  Syntax:'
+      + #10
+      + #10 + '    BMP4CJS "Input.BMP" [EQ. Midpoint] [EQ. Aperture] [?]'
+      + #10
+      + #10 + '  EQ. Midpoint must be a number from 1 to 99. The default value is 50, a lower'
+      + #10 + '  number lightens the image and a higher number darkens it.  EQ. Aperture must'
+      + #10 + '  be a number from 2 to 100 and the default value is maximum.  The  lower this'
+      + #10 + '  number is, the higher the contrast level.  The parameter "?" suppresses text'
+      + #10 + '  output and displays the preview image in a window (press ESC to close it).'
+      + #10
+      + #10 + '  E.g.:'
+      + #10
+      + #10 + '    BMP4CJS.EXE input.bmp . . ?'
+      + #10 + '    BMP4CJS.EXE input.bmp > output.html'
+      + #10 + '    BMP4CJS.EXE input.bmp 40 > brighter.html'
+      + #10 + '    BMP4CJS.EXE input.bmp 60 80 > darker.html'
+      + #10
+      );
+      Halt(1);
+  end
+  else
+  begin
+    BmpInput := Graphics.TBitmap.Create;
+    try
+      BmpInput.LoadFromFile(ParamStr(1));
+    except
+      BmpInput.Free;
+      Halt(2);
+    end;
+  end;
+
+{------------------------------------------------------------------------------}
+
+  BmpPreview := ParamStr(4) = '?';
+  BmpInput.PixelFormat := pf24bit; // <-- This variable has already been initialized.
+  SetStretchBltMode(BmpInput.Canvas.Handle, 4);
+  BmpInput.Canvas.CopyRect(Rect(0, 0, 56, 56), BmpInput.Canvas, BmpInput.Canvas.ClipRect);
+  BmpInput.Width  := 56;
+  BmpInput.Height := 56;
+  SetLength(PrintStdOut, 1568);
+
+{------------------------------------------------------------------------------}
+
+  EqM := Trunc(Min(Max(StrToIntDef(ParamStr(2),  50), 1),  99) * 2.55);
+  EqA := Round(Min(Max(StrToIntDef(ParamStr(3), 100), 2), 100) * 2.55);
+  SetLength(EqGrayRange, 256);
+  A := Max(EqM - EqA shr 1, 0);
+  B := Min(EqM + EqA shr 1, 255);
+  EqQ := 127/(EqM - A); for X :=  A  to EqM do EqGrayRange[X] := Trunc((X - A) * EqQ);
+  EqQ := 127/(B - EqM); for X := EqM to 255 do EqGrayRange[X] := Min(255, 127 + Trunc((X - EqM) * EqQ));
+
+{------------------------------------------------------------------------------}
+
+  BmpSeek := 0; EqM := 0;
+  for A := 0 to 55 do
+  begin
+    BmpPixels := BmpInput.ScanLine[A];
+    for B := 0 to 55 do
+    begin
+      X := B * 3;
+      EqA := (BmpPixels[X] + BmpPixels[X + 1] + BmpPixels[X + 2]) div 3;
+      Pix := (SubPixel4[Trunc((EqGrayRange[(MaxIntValue([BmpPixels[X], BmpPixels[X + 1], BmpPixels[X + 2]]) - EqA) div 2 + EqA]) / 36.5)] shr (((A + B) and 1) shl 1)) and 3;
+      if BmpPreview then begin Pix := Pix * 85; BmpPixels[X] := Pix; BmpPixels[X + 1] := Pix; BmpPixels[X + 2] := Pix; end
+      else
+      begin
+        Inc(BmpSeek);
+        EqA := BmpSeek and 1;
+        EqM := EqM or (Pix shl (2 * EqA));
+        if EqA = 0 then begin PrintStdOut[BmpSeek shr 1] := HexString[EqM + 1]; EqM := 0; end;
+      end;
+    end;
+  end;
+
+{------------------------------------------------------------------------------}
+
+  if BmpPreview then PreviewShow(BmpInput) else
+  begin
+    WriteLn(
+              '<!DOCTYPE html>'
+      + #10 + '<html>'
+      + #10 + '<head>'
+      + #10 + '<meta name="author" content="Generated with BMP4CJS v' + PgVersion + '">'
+      + #10 + '<title>' + ExtractFileName(ParamStr(1)) + '</title>'
+      + #10 + '</head>'
+      + #10 + '<body><canvas id="OutputCanvas" width="280" height="280" style="border:1px solid #000000"></canvas></body>' // style="background-color: #49413D"
+      + #10 + '<script>'
+      + #10 + 'var CanvasId = document.getElementById("OutputCanvas");'
+      + #10 + 'var O = CanvasId.getContext("2d");'
+      + #10 + 'var P = ["#000000", "#555555", "#AAAAAA", "#FFFFFF"];' // #49413D, #646152, #8A8D6E, #A5AD83
+      + #10 + 'var H = "' + PrintStdOut + '";'
+      + #10 + 'for (var X = 0; X < 3136; X++) {'
+      + #10 + 'O.fillStyle = P[((+("0x" + H[~~(X / 2)])) >> (((X + 1) & 1) * 2)) & 3];'
+      + #10 + 'O.fillRect((X % 56) * 5, (~~(X / 56)) * 5, 5, 5);'
+      + #10 + '}'
+      + #10 + '</script>'
+      + #10 + '</html>'
+      + #10
+      );
+  end;
+
+{------------------------------------------------------------------------------}
+end.
